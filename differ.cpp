@@ -39,6 +39,8 @@ struct DiffFile {
     std::string m_fromFilename;
     std::string m_toFilename;
 
+    std::string compileOptions;
+
     std::vector<DiffBlock> m_diffBlock;
 
 };
@@ -204,16 +206,39 @@ DiffFile diffParser_d(std::istream& file) {
         else if (line.size() >= 2 && line.substr(0,2) == "> ") {
             diffFile.m_diffBlock.back().m_plusLine.push_back(line.substr(2)+std::string(LINEMAXLEN - line.length(), ' '));
         }
+    }
+    return diffFile;
+}
 
+std::vector<std::string> findOptions(const std::deque<std::string>& lines) {
+
+    static const std::regex pattern_options{"\\/\\*\\*\\*[ ]*options\\$(.*)\\$"};
+    std::smatch match{};
+    std::string optionString;
+
+    for(auto& l : lines) {
+        if (std::regex_search(l, match, pattern_options)) {
+            optionString = match[1].str();
+        }
     }
 
-    return diffFile;
+    // never read so much nonsens about splitting a string with whitespaces!!
+
+    std::vector<std::string> parameterList;
+
+    std::size_t pos{0}, pos1{0};
+    while (pos<optionString.length()) {
+        parameterList.push_back(optionString.substr(pos, (pos1 = std::min(optionString.find_first_of(' ', pos+1),optionString.length()))-pos));
+        pos = pos1+1;
+    }
+    return parameterList;
 }
 
 DiffFile createDiffInformation(const std::string& filenameA, const std::string& filenameB)
 {
     boost::process::ipstream output;
     std::error_code ec;
+
     boost::process::system(boost::process::search_path("diff"), filenameA, filenameB, ec,
                            boost::process::std_out > output);
 
@@ -222,60 +247,65 @@ DiffFile createDiffInformation(const std::string& filenameA, const std::string& 
 
     DiffFile diffFile = diffParser_d(output);
 
+
+
     return diffFile;
 }
 
-void compileInformation(const std::string& filename, WINDOW* win)
+void compileInformation(const std::string& filename, WINDOW* win, const std::deque<std::string>& display)
 {
-    boost::process::ipstream output;
-
-    boost::process::child c1(boost::process::search_path("clang++"), "--std=c++14", filename,
-                            (boost::process::std_out & boost::process::std_err) > output);
-
-    scrollok(win,TRUE);
-
-    std::string execCall = "clang++ --std=c++14 "+filename;
-    mvwprintw(win, 2, 2, execCall.c_str());
-
-    std::string line;
     uint32_t l{4};
+    {
+        std::vector<std::string> options = findOptions(display);
+        boost::process::ipstream output;
+        boost::process::child c1(boost::process::search_path("clang++"), options, filename,
+                                 (boost::process::std_out & boost::process::std_err) > output);
 
-    while (c1.running() && std::getline(output, line) && !line.empty()) {
-        if (line.length() > 54)
-            line = line.substr(0,57);
-        mvwprintw(win, l++, 2, line.c_str());
+        std::string execCall = "clang++";
+        std::for_each(options.begin(), options.end(), [&execCall](const std::string& option){ execCall+= " " + option;});
+        execCall += " " + filename;
+        mvwprintw(win, 2, 2, execCall.c_str());
+
+        std::string line;
+
+        while (std::getline(output, line) && !line.empty()) {
+            if (line.length() > 54)
+                line = line.substr(0, 57);
+            mvwprintw(win, l++, 2, line.c_str());
+            wrefresh(win);
+        }
+        c1.wait();
+
+        l++;
+        mvwprintw(win, l++, 2, "---  compile finished   ---");
+        l++;
         wrefresh(win);
+
+        if (c1.exit_code() != 0) {
+            return;
+        }
     }
-    c1.wait();
+    {
+        boost::process::ipstream output2;
+        boost::process::child c2("./a.out", (boost::process::std_out & boost::process::std_err) > output2);
 
-    l++;
-    mvwprintw(win, l++, 2, "---  compile finished   ---");
-    l++;
-    wrefresh(win);
+        std::string execCall = "a.out";
+        mvwprintw(win, l++, 2, execCall.c_str());
 
-    if (c1.exit_code() != 0) {
-        return;
+        std::string line;
+        while (std::getline(output2, line) && !line.empty()) {
+            if (line.length() > 54)
+                line = line.substr(0, 57);
+            mvwprintw(win, l++, 2, line.c_str());
+            wrefresh(win);
+        }
+        c2.wait();
+
     }
-
-    boost::process::ipstream output2;
-    boost::process::child c2("./a.out", (boost::process::std_out & boost::process::std_err) > output2);
-
-    std::string exec = "a.out";
-    mvwprintw(win, l++, 2, execCall.c_str());
-
-    while (c2.running() && std::getline(output2, line) && !line.empty()) {
-        if (line.length() > 54)
-            line = line.substr(0,57);
-        mvwprintw(win, l++, 2, line.c_str());
-        wrefresh(win);
-    }
-    c2.wait();
-
     l++;
     mvwprintw(win, l++, 2, "---  execute finished  ---");
     l++;
     wrefresh(win);
-
 }
 
 
@@ -345,7 +375,7 @@ std::string chooser(const std::vector<std::string>& choice) {
 
 
 
-std::string chooseNextFile(const std::string& path, const std::string& suffix)
+std::string chooseNextFile(const std::string& path, const std::vector<std::string>& suffix)
 {
     boost::filesystem::path someDir(path);
     boost::filesystem::directory_iterator end_iter;
@@ -356,11 +386,11 @@ std::string chooseNextFile(const std::string& path, const std::string& suffix)
     {
         for( boost::filesystem::directory_iterator dir_iter(someDir) ; dir_iter != end_iter ; ++dir_iter)
         {
-            if (boost::filesystem::is_regular_file(dir_iter->status()) )
-            {
+            if (boost::filesystem::is_regular_file(dir_iter->status()) ) {
                 std::string name{dir_iter->path().string().substr(2)};
-                if (name.length() > suffix.length() && name.substr(name.length()-suffix.length()) == suffix)
-                    files.push_back(name);
+                for (auto &i : suffix)
+                    if (name.length() > i.length() && name.substr(name.length() - i.length()) == i)
+                        files.push_back(name);
             }
         }
     }
@@ -385,7 +415,7 @@ int main(int argc, char* argv[]) {
     std::string currentFile{"/dev/null"};
 
     std::deque<std::string> display;
-    display.resize(50);
+    for(uint32_t i{0};i<50; ++i) display.push_back(std::string(LINEMAXLEN, ' '));
 
     int c;
 
@@ -398,7 +428,7 @@ int main(int argc, char* argv[]) {
                 /* Print a border around the main window and print a title */
                 box(my_compile_win.get(), 0, 0);
                 wrefresh(my_compile_win.get());
-                compileInformation(currentFile, my_compile_win.get());
+                compileInformation(currentFile, my_compile_win.get(), display);
                 getch();
             }
 
@@ -412,8 +442,12 @@ int main(int argc, char* argv[]) {
             break;
 
         if (c == 'd') {
-            std::string b = chooseNextFile("./", ".cpp");
+            std::string b = chooseNextFile("./", {".cpp",".h"});
             clear();
+            int l = 0;
+            for (auto line : display) {
+                mvprintw(l++, 0, line.c_str());
+            }
             refresh();
             if (b == "exit")
                 break;
