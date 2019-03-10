@@ -22,6 +22,15 @@
 
 using namespace std::chrono_literals;
 
+enum class FileType {
+    regularFile,
+    directory,
+    command
+};
+
+typedef std::tuple<std::string, FileType> File;
+
+
 struct DiffBlock {
     uint32_t m_pStart_orig;
     uint32_t m_pEnd_orig;
@@ -309,7 +318,7 @@ void compileInformation(const std::string& filename, WINDOW* win, const std::deq
 }
 
 
-std::string chooser(const std::vector<std::string>& choice) {
+File chooser(const std::vector<File>& choice) {
 
     int c;
     MENU *my_menu;
@@ -319,7 +328,7 @@ std::string chooser(const std::vector<std::string>& choice) {
     my_items.reserve(choice.size()+1);
 
     for (auto& i : choice)
-        my_items.push_back(new_item(i.c_str(),""));
+        my_items.push_back(new_item(std::get<0>(i).c_str(),""));
     my_items.push_back(NULL);
 
     my_menu = new_menu(my_items.data());
@@ -373,31 +382,56 @@ std::string chooser(const std::vector<std::string>& choice) {
     return choice[pos];
 }
 
-
-
-std::string chooseNextFile(const std::string& path, const std::vector<std::string>& suffix)
+std::string chooseNextFile(std::string path, const std::vector<std::string>& suffix)
 {
-    boost::filesystem::path someDir(path);
     boost::filesystem::directory_iterator end_iter;
 
-    std::vector<std::string> files;
+    File file {path, FileType::directory};
 
-    if ( boost::filesystem::exists(someDir) && boost::filesystem::is_directory(someDir))
-    {
-        for( boost::filesystem::directory_iterator dir_iter(someDir) ; dir_iter != end_iter ; ++dir_iter)
-        {
-            if (boost::filesystem::is_regular_file(dir_iter->status()) ) {
-                std::string name{dir_iter->path().string().substr(2)};
-                for (auto &i : suffix)
-                    if (name.length() > i.length() && name.substr(name.length() - i.length()) == i)
-                        files.push_back(name);
+    while (std::get<FileType>(file) == FileType::directory) {
+
+        boost::filesystem::path someDir(path);
+        std::vector<File> files;
+
+        files.push_back(std::make_tuple("..", FileType::directory));
+
+        if (boost::filesystem::exists(someDir) && boost::filesystem::is_directory(someDir)) {
+            for (boost::filesystem::directory_iterator dir_iter(someDir); dir_iter != end_iter; ++dir_iter) {
+                if (boost::filesystem::is_regular_file(dir_iter->status())) {
+                    std::string name{dir_iter->path().string().substr(path.length())};
+                    for (auto &i : suffix)
+                        if (name.length() > i.length() && name.substr(name.length() - i.length()) == i)
+                            files.push_back(std::make_tuple(name, FileType::regularFile));
+                }
+                if (boost::filesystem::is_directory(dir_iter->status())) {
+                    std::string name{dir_iter->path().string().substr(path.length())};
+                    if (name.at(0) != '.')
+                        files.push_back(std::make_tuple(name, FileType::directory));
+                }
             }
         }
-    }
 
-    files.push_back("/dev/null");
-    files.push_back("exit");
-    return chooser(files);
+        std::sort(std::begin(files), std::end(files), [](const File& file1, const File& file2) {
+            auto cmp_type_less = [](const FileType& type1, const FileType& type2) {
+                return (type1 == FileType::command && type2 != FileType::command) ||
+                        (type1 == FileType::directory && type2 == FileType::regularFile);
+            };
+            auto cmp_type_equal = [](const FileType& type1, const FileType& type2) {
+                return type1 == type2;
+            };
+            return cmp_type_less(std::get<FileType>(file1), std::get<FileType>(file2)) ||
+                    (cmp_type_equal(std::get<FileType>(file1), std::get<FileType>(file2)) &&
+                     std::get<std::string>(file1) < std::get<std::string>(file2));
+        });
+
+        files.push_back(std::make_tuple("/dev/null", FileType::regularFile));
+        files.push_back(std::make_tuple("exit", FileType::command));
+        file = chooser(files);
+        if (std::get<FileType>(file) == FileType::directory)
+            path += std::get<std::string>(file) + "/";
+
+    }
+    return path + std::get<std::string>(file);
 }
 
 int main(int argc, char* argv[]) {
@@ -407,10 +441,10 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    initscr();            /* Start curses mode 		*/
-    cbreak();            /* Line buffering disabled, Pass on
-	curs_set(0);				 * everty thing to me 		*/
-    keypad(stdscr, TRUE);        /* I need that nifty F1 	*/
+    initscr();
+    cbreak();
+	curs_set(0);
+    keypad(stdscr, TRUE);
 
     std::string currentFile{"/dev/null"};
 
@@ -425,7 +459,6 @@ int main(int argc, char* argv[]) {
                 auto my_compile_win = std::unique_ptr<WINDOW, std::function<void(WINDOW *)>>
                         (newwin(20, 60, 4, 4),
                          [](WINDOW *w) { delwin(w); });
-                /* Print a border around the main window and print a title */
                 box(my_compile_win.get(), 0, 0);
                 wrefresh(my_compile_win.get());
                 compileInformation(currentFile, my_compile_win.get(), display);
@@ -470,20 +503,3 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
-
-/*
-
-    for (auto i : dFile3.m_diffBlock) {
-        std::cout << "new Block: " << i.m_pStart_orig << ":" << i.m_pEnd_orig << "\n";
-        std::cout << "\nout lines:\n";
-        for (auto l : i.m_minusLine) {
-            std::cout << l << "\r";
-        }
-        std::cout << "\nin lines:\n";
-        for (auto l : i.m_plusLine) {
-            std::cout << l << "\r";
-        }
-
-    }
-
-*/
